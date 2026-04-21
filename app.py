@@ -23,6 +23,7 @@ from database.models import (
     ReporteSistemaCategoriaDetalle,
     ReporteSistemaComboDetalle,
     ReporteCheckCorreccion,
+    VentaTurnoBorrador,
     User,
 )
 from services.auth import authenticate_user, create_user, delete_user, reset_user_password, update_user
@@ -79,6 +80,155 @@ def has_any_user() -> bool:
         return bool(db.scalar(select(User.id).limit(1)))
     finally:
         db.close()
+
+
+def parse_draft_date(value: str):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def parse_draft_time(value: str):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%H:%M").time()
+    except ValueError:
+        return None
+
+
+def load_ventas_draft(username: str) -> dict | None:
+    db = SessionLocal()
+    try:
+        draft = db.scalar(
+            select(VentaTurnoBorrador).where(VentaTurnoBorrador.usuario == username)
+        )
+        if draft is None:
+            return None
+
+        try:
+            counts = json.loads(draft.counts_json or "{}")
+        except json.JSONDecodeError:
+            counts = {}
+        try:
+            hist = json.loads(draft.hist_json or "[]")
+        except json.JSONDecodeError:
+            hist = []
+
+        return {
+            "local": draft.local_descripcion,
+            "fecha": draft.fecha_reporte,
+            "turno": int(draft.turno or 1),
+            "hora_inicio": draft.hora_inicio,
+            "hora_cierre": draft.hora_cierre,
+            "encargado": draft.encargado,
+            "counts": {str(key): int(value) for key, value in counts.items()},
+            "hist": hist,
+        }
+    finally:
+        db.close()
+
+
+def restore_ventas_draft(username: str, force_page: bool = False) -> None:
+    draft = load_ventas_draft(username)
+    if not draft:
+        return
+
+    st.session_state.counts = draft["counts"]
+    st.session_state.hist = draft["hist"]
+    st.session_state.ventas_draft = draft
+    st.session_state.ventas_draft_loaded = True
+    st.session_state.report_success = False
+    st.session_state.confirm = False
+    st.session_state.require_hora_cierre = False
+    if force_page:
+        st.session_state.page = "Ventas por turno"
+
+
+def save_ventas_draft(
+    username: str | None,
+    local: str,
+    fecha,
+    turno: int,
+    hi,
+    hc,
+    enc: str,
+) -> None:
+    if not username:
+        return
+
+    counts = {
+        str(key): int(value)
+        for key, value in st.session_state.get("counts", {}).items()
+        if int(value) != 0
+    }
+    hist = st.session_state.get("hist", [])
+    has_content = bool(counts or hist or local or fecha or hi or hc or enc.strip())
+    if not has_content:
+        return
+
+    fecha_text = fecha.isoformat() if fecha else ""
+    hi_text = hi.strftime("%H:%M") if hi else ""
+    hc_text = hc.strftime("%H:%M") if hc else ""
+
+    db = SessionLocal()
+    try:
+        draft = db.scalar(
+            select(VentaTurnoBorrador).where(VentaTurnoBorrador.usuario == username)
+        )
+        if draft is None:
+            draft = VentaTurnoBorrador(usuario=username)
+            db.add(draft)
+
+        draft.local_descripcion = local or ""
+        draft.fecha_reporte = fecha_text
+        draft.turno = int(turno or 1)
+        draft.hora_inicio = hi_text
+        draft.hora_cierre = hc_text
+        draft.encargado = enc.strip()
+        draft.counts_json = json.dumps(counts)
+        draft.hist_json = json.dumps(hist)
+        draft.updated_at = datetime.utcnow()
+        db.commit()
+        st.session_state.ventas_draft_loaded = True
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def clear_ventas_draft(username: str | None) -> None:
+    if not username:
+        return
+
+    db = SessionLocal()
+    try:
+        draft = db.scalar(
+            select(VentaTurnoBorrador).where(VentaTurnoBorrador.usuario == username)
+        )
+        if draft is not None:
+            db.delete(draft)
+            db.commit()
+    finally:
+        db.close()
+
+
+def save_current_ventas_draft_from_state() -> None:
+    version = st.session_state.get("ventas_form_version", 0)
+    save_ventas_draft(
+        st.session_state.get("username"),
+        st.session_state.get(f"ventas_local_{version}", ""),
+        st.session_state.get(f"ventas_fecha_{version}"),
+        st.session_state.get(f"ventas_turno_{version}", 1),
+        st.session_state.get(f"hora_inicio_video_{version}"),
+        st.session_state.get(f"hora_cierre_video_{version}"),
+        st.session_state.get(f"ventas_encargado_{version}", ""),
+    )
+
 
 CATEGORY_COLORS = {
     "CAFETERA": "#FFF200",
@@ -259,6 +409,7 @@ def login() -> None:
         if user:
             st.session_state.auth = True
             st.session_state.username = user.username
+            restore_ventas_draft(user.username, force_page=True)
             st.rerun()
         else:
             st.error("Credenciales incorrectas")
@@ -338,6 +489,7 @@ def apply_counter_click(item_type: str, item, key: str) -> None:
                 "key": key,
             }
         )
+    save_current_ventas_draft_from_state()
 
 
 def undo_last_counter_click() -> None:
@@ -350,11 +502,13 @@ def undo_last_counter_click() -> None:
         key = counter_key("cat", last_action)
         if st.session_state.counts.get(key, 0) > 0:
             st.session_state.counts[key] -= 1
+        save_current_ventas_draft_from_state()
         return
 
     if isinstance(last_action, str):
         if st.session_state.counts.get(last_action, 0) > 0:
             st.session_state.counts[last_action] -= 1
+        save_current_ventas_draft_from_state()
         return
 
     if last_action.get("type") == "combo":
@@ -365,16 +519,20 @@ def undo_last_counter_click() -> None:
         for category_key, quantity in last_action["categories"]:
             current = st.session_state.counts.get(category_key, 0)
             st.session_state.counts[category_key] = max(0, current - quantity)
+        save_current_ventas_draft_from_state()
         return
 
     key = last_action.get("key")
     if key and st.session_state.counts.get(key, 0) > 0:
         st.session_state.counts[key] -= 1
+    save_current_ventas_draft_from_state()
 
 
 def reset_ventas_form() -> None:
     st.session_state.counts = {}
     st.session_state.hist = []
+    st.session_state.ventas_draft = {}
+    st.session_state.ventas_draft_loaded = False
     st.session_state.confirm = False
     st.session_state.require_hora_cierre = False
     st.session_state.report_success = True
@@ -393,6 +551,7 @@ def save_reporte_ventas(
 ) -> None:
     category_rows = []
     combo_rows = []
+    fecha_creacion = datetime.combine(fecha_reporte, datetime.min.time())
 
     for cat in cats:
         category_rows.append(
@@ -416,8 +575,21 @@ def save_reporte_ventas(
 
     db = SessionLocal()
     try:
+        existing_report = db.scalar(
+            select(ReporteVentaTurno).where(
+                ReporteVentaTurno.fecha_creacion == fecha_creacion,
+                ReporteVentaTurno.local_descripcion == local,
+                ReporteVentaTurno.turno == int(turno),
+            )
+        )
+        if existing_report is not None:
+            raise ValueError(
+                "Ya existe un reporte cerrado para esa fecha, local y turno. "
+                "No se grabo un duplicado."
+            )
+
         reporte = ReporteVentaTurno(
-            fecha_creacion=datetime.combine(fecha_reporte, datetime.min.time()),
+            fecha_creacion=fecha_creacion,
             local_descripcion=local,
             turno=int(turno),
             hora_inicio=hi.strftime("%H:%M"),
@@ -451,6 +623,7 @@ def save_reporte_ventas(
             )
 
         db.commit()
+        clear_ventas_draft(st.session_state.username)
     except Exception:
         db.rollback()
         raise
@@ -1660,6 +1833,129 @@ def count_control_sistema_rows(reporte_id: int) -> int:
         db.close()
 
 
+def current_user_is_admin() -> bool:
+    username = st.session_state.get("username")
+    if not username:
+        return False
+
+    db = SessionLocal()
+    try:
+        user = db.scalar(select(User).where(User.username == username))
+        return bool(user and user.role == "admin")
+    finally:
+        db.close()
+
+
+def delete_reporte_cerrado(reporte_id: int) -> None:
+    db = SessionLocal()
+    try:
+        db.query(ReporteSistemaArticuloDetalle).filter(
+            ReporteSistemaArticuloDetalle.reporte_id == reporte_id
+        ).delete(synchronize_session=False)
+        db.query(ReporteSistemaCategoriaDetalle).filter(
+            ReporteSistemaCategoriaDetalle.reporte_id == reporte_id
+        ).delete(synchronize_session=False)
+        db.query(ReporteSistemaComboDetalle).filter(
+            ReporteSistemaComboDetalle.reporte_id == reporte_id
+        ).delete(synchronize_session=False)
+        db.query(ReporteCheckCorreccion).filter(
+            ReporteCheckCorreccion.reporte_id == reporte_id
+        ).delete(synchronize_session=False)
+        db.query(ReporteVentaTurnoDetalle).filter(
+            ReporteVentaTurnoDetalle.reporte_id == reporte_id
+        ).delete(synchronize_session=False)
+        db.query(ReporteVentaTurnoComboDetalle).filter(
+            ReporteVentaTurnoComboDetalle.reporte_id == reporte_id
+        ).delete(synchronize_session=False)
+
+        reporte = db.get(ReporteVentaTurno, reporte_id)
+        if reporte is not None:
+            db.delete(reporte)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def find_duplicate_report_cleanup_groups(reportes: list[ReporteVentaTurno]) -> list[dict]:
+    grouped: dict[tuple, list[ReporteVentaTurno]] = {}
+    for reporte in reportes:
+        key = (reporte.fecha_creacion, reporte.local_descripcion, int(reporte.turno))
+        grouped.setdefault(key, []).append(reporte)
+
+    cleanup_groups = []
+    for (fecha, local, turno), group in grouped.items():
+        if len(group) <= 1:
+            continue
+
+        system_counts = {
+            reporte.id: count_control_sistema_rows(int(reporte.id))
+            for reporte in group
+        }
+        keepers = [reporte for reporte in group if system_counts[reporte.id] > 0]
+        deletable = [reporte for reporte in group if system_counts[reporte.id] == 0]
+
+        if len(keepers) == 1 and deletable:
+            cleanup_groups.append(
+                {
+                    "fecha": fecha,
+                    "local": local,
+                    "turno": turno,
+                    "keep": keepers[0],
+                    "delete": sorted(deletable, key=lambda reporte: reporte.id),
+                }
+            )
+
+    return cleanup_groups
+
+
+def render_duplicate_cleanup(reportes: list[ReporteVentaTurno]) -> None:
+    if not current_user_is_admin():
+        return
+
+    cleanup_groups = find_duplicate_report_cleanup_groups(reportes)
+    if not cleanup_groups:
+        return
+
+    with st.expander("Limpieza de reportes duplicados"):
+        st.warning(
+            "Se detectaron reportes con la misma fecha, local y turno. "
+            "Solo se puede eliminar automaticamente cuando existe un unico reporte "
+            "con Control con Sistema y los demas no lo tienen."
+        )
+
+        for group in cleanup_groups:
+            keep = group["keep"]
+            delete_ids = [int(reporte.id) for reporte in group["delete"]]
+            group_key = (
+                f"{group['fecha'].strftime('%Y%m%d')}_"
+                f"{group['local']}_{group['turno']}_{keep.id}"
+            )
+            st.write(
+                f"{group['fecha'].strftime('%d/%m/%y')} | "
+                f"{group['local']} | Turno {group['turno']} | "
+                f"se conserva reporte {keep.id}; se eliminan {delete_ids}."
+            )
+            confirmed = st.checkbox(
+                "Confirmar eliminacion",
+                key=f"confirm_cleanup_{group_key}",
+            )
+            if st.button(
+                "Eliminar duplicados sin Control con Sistema",
+                key=f"delete_cleanup_{group_key}",
+                disabled=not confirmed,
+            ):
+                try:
+                    for reporte_id in delete_ids:
+                        delete_reporte_cerrado(reporte_id)
+                    st.success("Reportes duplicados eliminados correctamente.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"No se pudieron eliminar los duplicados: {exc}")
+
+
 def process_control_sistema_and_refresh(reporte_id: int, uploaded_file) -> None:
     result = process_control_sistema_excel(reporte_id, uploaded_file)
     st.session_state.control_sistema_last_result = {
@@ -1862,6 +2158,17 @@ def ventas() -> None:
     finally:
         db.close()
 
+    draft = st.session_state.get("ventas_draft") or {}
+    draft_local = draft.get("local", "")
+    local_options = ["", *[l.descripcion for l in locs]]
+    if draft_local and draft_local not in local_options:
+        local_options.append(draft_local)
+    draft_fecha = parse_draft_date(draft.get("fecha", ""))
+    draft_hora_inicio = parse_draft_time(draft.get("hora_inicio", ""))
+    draft_hora_cierre = parse_draft_time(draft.get("hora_cierre", ""))
+    draft_turno = int(draft.get("turno", 1) or 1)
+    draft_encargado = draft.get("encargado", "")
+
     st.markdown(
         """
         <style>
@@ -1897,35 +2204,47 @@ def ventas() -> None:
     with c1:
         local = st.selectbox(
             "Locales",
-            ["", *[l.descripcion for l in locs]],
+            local_options,
+            index=local_options.index(draft_local) if draft_local in local_options else 0,
             key=f"ventas_local_{version}",
         )
     with c2:
         fecha = st.date_input(
             "Fecha",
-            value=None,
+            value=draft_fecha,
             format="DD/MM/YYYY",
             key=f"ventas_fecha_{version}",
         )
     with c3:
-        turno = st.number_input("Turno", min_value=1, step=1, key=f"ventas_turno_{version}")
+        turno = st.number_input(
+            "Turno",
+            min_value=1,
+            step=1,
+            value=draft_turno,
+            key=f"ventas_turno_{version}",
+        )
     with c4:
         hi = st.time_input(
             "Hora Inicio (video)",
-            value=None,
+            value=draft_hora_inicio,
             key=f"hora_inicio_video_{version}",
         )
     with c5:
         hc = st.time_input(
             "Hora Cierre (video)",
-            value=None,
+            value=draft_hora_cierre,
             key=f"hora_cierre_video_{version}",
         )
 
     if hc is not None:
         st.session_state.require_hora_cierre = False
 
-    enc = st.text_input("Encargado", max_chars=30, key=f"ventas_encargado_{version}")
+    enc = st.text_input(
+        "Encargado",
+        value=draft_encargado,
+        max_chars=30,
+        key=f"ventas_encargado_{version}",
+    )
 
     st.divider()
 
@@ -2020,9 +2339,17 @@ def ventas() -> None:
 
             with s:
                 if st.button("SI"):
-                    save_reporte_ventas(fecha, local, turno, hi, hc, enc, cats, combos_list)
-                    reset_ventas_form()
-                    st.rerun()
+                    try:
+                        save_reporte_ventas(fecha, local, turno, hi, hc, enc, cats, combos_list)
+                    except ValueError as exc:
+                        st.session_state.confirm = False
+                        st.error(str(exc))
+                    except Exception as exc:
+                        st.session_state.confirm = False
+                        st.error(f"No se pudo cerrar el reporte: {exc}")
+                    else:
+                        reset_ventas_form()
+                        st.rerun()
 
             with n:
                 if st.button("NO"):
@@ -2034,6 +2361,7 @@ def ventas() -> None:
     render_counter_group("Categorias", "cat", cats)
     render_counter_group("Combos", "combo", combos_list)
     render_combo_quick_lookup(combos_list, combo_articles)
+    save_ventas_draft(st.session_state.username, local, fecha, turno, hi, hc, enc)
 
 
 def inicio() -> None:
@@ -3178,6 +3506,8 @@ def reportes_cerrados() -> None:
     if not reportes:
         st.info("No hay reportes cerrados.")
         return
+
+    render_duplicate_cleanup(reportes)
 
     header = st.columns([1.2, 1.4, 0.7, 1.6, 1.5, 1.8])
     header[0].markdown("**Fecha**")

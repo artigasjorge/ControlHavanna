@@ -2,7 +2,7 @@ from datetime import datetime
 
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from database.db import Base
@@ -62,6 +62,9 @@ class Combo(Base):
 
 class ReporteVentaTurno(Base):
     __tablename__ = "reportes_ventas_turno"
+    __table_args__ = (
+        UniqueConstraint("fecha_creacion", "local_descripcion", "turno", name="uq_reporte_fecha_local_turno"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     fecha_creacion: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
@@ -73,6 +76,25 @@ class ReporteVentaTurno(Base):
     usuario_cierre: Mapped[str] = mapped_column(String(50), nullable=False)
     total_items: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     estado: Mapped[str] = mapped_column(String(20), nullable=False, default="CERRADO")
+
+
+class VentaTurnoBorrador(Base):
+    __tablename__ = "ventas_turno_borradores"
+    __table_args__ = (
+        UniqueConstraint("usuario", name="uq_ventas_turno_borrador_usuario"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    usuario: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    local_descripcion: Mapped[str] = mapped_column(String(150), nullable=False, default="")
+    fecha_reporte: Mapped[str] = mapped_column(String(10), nullable=False, default="")
+    turno: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    hora_inicio: Mapped[str] = mapped_column(String(10), nullable=False, default="")
+    hora_cierre: Mapped[str] = mapped_column(String(10), nullable=False, default="")
+    encargado: Mapped[str] = mapped_column(String(30), nullable=False, default="")
+    counts_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    hist_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class ReporteVentaTurnoDetalle(Base):

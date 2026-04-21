@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local databases and backups
+database/schema.db
+database/backups/
+*.db
+
+# Local uploads / exports
+*.xlsx
+*.xls
+*.csv
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Codex local session file
+.codex
