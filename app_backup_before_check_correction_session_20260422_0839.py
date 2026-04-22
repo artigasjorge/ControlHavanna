@@ -718,18 +718,6 @@ def report_button(label: str, html: str) -> None:
             button.addEventListener("click", () => {{
                 const bytes = Uint8Array.from(atob(reportHtmlBase64), (char) => char.charCodeAt(0));
                 const reportHtml = new TextDecoder("utf-8").decode(bytes);
-                const mainWindowName = "ControlHavannaMain";
-                let appBaseUrl = window.location.origin + window.location.pathname;
-                try {{
-                    if (window.parent && window.parent !== window) {{
-                        window.parent.name = mainWindowName;
-                        appBaseUrl = window.parent.location.origin + window.parent.location.pathname;
-                    }} else {{
-                        window.name = mainWindowName;
-                    }}
-                }} catch (error) {{
-                    window.name = mainWindowName;
-                }}
                 const reportWindow = window.open("", "_blank");
                 if (!reportWindow) {{
                     alert("El navegador bloqueo la ventana del informe. Habilite ventanas emergentes para esta pagina.");
@@ -738,8 +726,6 @@ def report_button(label: str, html: str) -> None:
                 reportWindow.document.open();
                 reportWindow.document.write(reportHtml);
                 reportWindow.document.close();
-                reportWindow.ControlHavannaAppBaseUrl = appBaseUrl;
-                reportWindow.ControlHavannaMainWindowName = mainWindowName;
                 reportWindow.document.title = reportTitle;
                 reportWindow.focus();
             }});
@@ -1412,21 +1398,16 @@ def build_check_vs_sistema_html(reporte: ReporteVentaTurno) -> str:
             detailWindow.focus();
         }}
         function openCorrection(tipo, codigo) {{
-            const baseUrl = window.ControlHavannaAppBaseUrl
-                || (window.opener && window.opener.ControlHavannaAppBaseUrl)
-                || (window.location.origin + window.location.pathname);
-            const targetName = window.ControlHavannaMainWindowName
-                || (window.opener && window.opener.ControlHavannaMainWindowName)
-                || "ControlHavannaMain";
+            const openerLocation = window.opener && window.opener.location
+                ? window.opener.location
+                : window.location;
+            const baseUrl = openerLocation.origin + openerLocation.pathname;
             const url = baseUrl
                 + "?check_correccion=1"
                 + "&reporte_id={reporte.id}"
                 + "&tipo=" + encodeURIComponent(tipo)
                 + "&codigo=" + encodeURIComponent(codigo);
-            const correctionWindow = window.open(url, targetName);
-            if (correctionWindow) {{
-                correctionWindow.focus();
-            }}
+            window.open(url, "_blank");
         }}
     </script>
     {datos}
@@ -1628,7 +1609,7 @@ def render_check_correccion_page() -> None:
                     correccion=int(correccion),
                     cantidad_corregida=cantidad_corregida,
                     detalle=detalle_texto.strip(),
-                    usuario=st.session_state.get("username") or "usuario no identificado",
+                    usuario=st.session_state.username or "",
                 )
             )
             db.commit()
@@ -3586,12 +3567,12 @@ def main() -> None:
     init()
     render_header()
 
-    if is_check_correction_request():
-        render_check_correccion_page()
-        return
-
     if not st.session_state.auth:
         login()
+        return
+
+    if is_check_correction_request():
+        render_check_correccion_page()
         return
 
     pagina = menu_lateral()

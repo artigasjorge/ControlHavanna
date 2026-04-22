@@ -1628,7 +1628,7 @@ def render_check_correccion_page() -> None:
                     correccion=int(correccion),
                     cantidad_corregida=cantidad_corregida,
                     detalle=detalle_texto.strip(),
-                    usuario=st.session_state.get("username") or "usuario no identificado",
+                    usuario=st.session_state.username or "",
                 )
             )
             db.commit()
@@ -3586,12 +3586,12 @@ def main() -> None:
     init()
     render_header()
 
-    if is_check_correction_request():
-        render_check_correccion_page()
-        return
-
     if not st.session_state.auth:
         login()
+        return
+
+    if is_check_correction_request():
+        render_check_correccion_page()
         return
 
     pagina = menu_lateral()
